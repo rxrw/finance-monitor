@@ -45,8 +45,7 @@ class HistoricalDataImporter:
                     start=self.start_date,
                     end=self.end_date,
                     interval='1d',
-                    progress=False,
-                    verify=False
+                    progress=False
                 )
                 if not data.empty:
                     return data

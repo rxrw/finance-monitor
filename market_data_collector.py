@@ -46,13 +46,11 @@ class MarketDataCollector:
         """获取最新数据，带重试机制"""
         for attempt in range(retries):
             try:
-                # 添加verify=False来处理SSL问题
                 data = yf.download(
                     symbol, 
                     period='1d', 
                     interval='1m', 
-                    progress=False,
-                    verify=False
+                    progress=False
                 )
                 if not data.empty:
                     latest = data.iloc[-1]

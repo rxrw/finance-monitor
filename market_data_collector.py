@@ -46,7 +46,14 @@ class MarketDataCollector:
         """获取最新数据，带重试机制"""
         for attempt in range(retries):
             try:
-                data = yf.download(symbol, period='1d', interval='1m', progress=False)
+                # 添加verify=False来处理SSL问题
+                data = yf.download(
+                    symbol, 
+                    period='1d', 
+                    interval='1m', 
+                    progress=False,
+                    verify=False
+                )
                 if not data.empty:
                     latest = data.iloc[-1]
                     return {
@@ -56,7 +63,7 @@ class MarketDataCollector:
             except Exception as e:
                 logger.error(f"第{attempt + 1}次获取{symbol}数据失败: {e}")
                 if attempt < retries - 1:
-                    time.sleep(5)
+                    time.sleep(5 * (attempt + 1))  # 递增等待时间
         return None
 
     def fetch_usd_index(self):
@@ -110,7 +117,20 @@ class MarketDataCollector:
         for market, symbols in STOCKS.items():
             for symbol in symbols:
                 try:
-                    data = self.get_latest_data(symbol)
+                    # 修正股票代码格式
+                    if market == 'HK':
+                        yf_symbol = "^HSI"  # 恒生指数特殊处理
+                    elif market == 'CN':
+                        if symbol == '000001.SS':
+                            yf_symbol = '000001.SS'  # 上证指数
+                        elif symbol == '399001.SZ':
+                            yf_symbol = '399001.SZ'  # 深证成指
+                        elif symbol == '899050.BJ':
+                            yf_symbol = '899050.BJ'  # 北证50
+                    else:
+                        yf_symbol = symbol
+                    
+                    data = self.get_latest_data(yf_symbol)
                     if data is not None:
                         price = self.round_decimal(data['Close'])
                         volume = data['Volume']

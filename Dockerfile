@@ -5,7 +5,16 @@ WORKDIR /app
 # 安装系统依赖
 RUN apt-get update && apt-get install -y \
     default-mysql-client \
+    ca-certificates \
+    tzdata \
     && rm -rf /var/lib/apt/lists/*
+
+# 更新证书
+RUN update-ca-certificates
+
+# 设置时区
+ENV TZ=Asia/Shanghai
+RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
 
 # 复制项目文件
 COPY requirements.txt .

@@ -40,20 +40,20 @@ class HistoricalDataImporter:
         """获取历史数据，带重试机制"""
         for attempt in range(retries):
             try:
-                # 使用download而不是Ticker对象，并明确指定period和interval
                 data = yf.download(
                     symbol,
                     start=self.start_date,
                     end=self.end_date,
                     interval='1d',
-                    progress=False
+                    progress=False,
+                    verify=False
                 )
                 if not data.empty:
                     return data
             except Exception as e:
                 logger.error(f"第{attempt + 1}次获取{symbol}数据失败: {e}")
                 if attempt < retries - 1:
-                    time.sleep(5)  # 重试前等待
+                    time.sleep(5 * (attempt + 1))  # 递增等待时间
         return None
 
     def import_historical_exchange_rates(self):
@@ -121,18 +121,20 @@ class HistoricalDataImporter:
         for market, symbols in STOCKS.items():
             for symbol in symbols:
                 try:
-                    # 根据市场调整股票代码格式
+                    # 修正股票代码格式
                     if market == 'HK':
-                        yf_symbol = f"{symbol}.HK"
+                        yf_symbol = "^HSI"  # 恒生指数特殊处理
                     elif market == 'CN':
-                        if symbol.startswith('6'):
-                            yf_symbol = f"{symbol}.SS"  # 上海
-                        else:
-                            yf_symbol = f"{symbol}.SZ"  # 深圳
+                        if symbol == '000001.SS':
+                            yf_symbol = '000001.SS'  # 上证指数
+                        elif symbol == '399001.SZ':
+                            yf_symbol = '399001.SZ'  # 深证成指
+                        elif symbol == '899050.BJ':
+                            yf_symbol = '899050.BJ'  # 北证50
                     else:
                         yf_symbol = symbol
                     
-                    data = yf.download(yf_symbol, start=self.start_date, end=self.end_date, interval='1d')
+                    data = self.get_historical_data(yf_symbol)
                     
                     for index, row in data.iterrows():
                         try:

@@ -18,9 +18,13 @@ CURRENCIES = json.loads(os.environ.get('CURRENCIES', json.dumps(DEFAULT_CURRENCI
 
 # 从环境变量获取股票配置
 DEFAULT_STOCKS = {
-    'US': ['^DJI', '^GSPC', '^IXIC'],
-    'HK': ['^HSI'],
-    'CN': ['000001.SS', '399001.SZ']
+    'US': ['^DJI', '^GSPC', '^IXIC'],  # 道琼斯、标普500、纳斯达克
+    'HK': ['^HSI'],                     # 恒生指数
+    'CN': [
+        '000001.SS',   # 上证指数
+        '399001.SZ',   # 深证成指
+        '899050.BJ'    # 北证50
+    ]
 }
 STOCKS = json.loads(os.environ.get('STOCKS', json.dumps(DEFAULT_STOCKS)))
 

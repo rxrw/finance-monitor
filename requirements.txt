@@ -1,0 +1,4 @@
+requests>=2.31.0
+mysql-connector-python>=8.0.33
+yfinance>=0.2.36
+investpy>=1.0.8 

@@ -17,6 +17,25 @@ services:
       timeout: 5s
       retries: 5
 
+  influxdb:
+    image: influxdb:2.7
+    environment:
+      DOCKER_INFLUXDB_INIT_MODE: setup
+      DOCKER_INFLUXDB_INIT_USERNAME: ${INFLUXDB_USER:-admin}
+      DOCKER_INFLUXDB_INIT_PASSWORD: ${INFLUXDB_PASSWORD:-adminpassword}
+      DOCKER_INFLUXDB_INIT_ORG: ${INFLUXDB_ORG:-myorg}
+      DOCKER_INFLUXDB_INIT_BUCKET: ${INFLUXDB_BUCKET:-market_data}
+      DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: ${INFLUXDB_TOKEN:-mytoken}
+    volumes:
+      - influxdb_data:/var/lib/influxdb2
+    ports:
+      - "8086:8086"
+    healthcheck:
+      test: ["CMD", "influx", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   collector:
     build: .
     environment:
@@ -24,11 +43,21 @@ services:
       DB_USER: ${DB_USER:-root}
       DB_PASSWORD: ${DB_PASSWORD:-}
       DB_NAME: ${DB_NAME:-market_data}
-      FETCH_INTERVAL: ${FETCH_INTERVAL:-3600}
+      USE_MYSQL: ${USE_MYSQL:-true}
+      USE_INFLUXDB: ${USE_INFLUXDB:-true}
+      INFLUXDB_URL: http://influxdb:8086
+      INFLUXDB_TOKEN: ${INFLUXDB_TOKEN:-mytoken}
+      INFLUXDB_ORG: ${INFLUXDB_ORG:-myorg}
+      INFLUXDB_BUCKET: ${INFLUXDB_BUCKET:-market_data}
+      FETCH_INTERVAL: ${FETCH_INTERVAL:-900}
       HISTORY_START_DATE: ${HISTORY_START_DATE:-2017-07-01}
+      HISTORY_FETCH_ENABLED: ${HISTORY_FETCH_ENABLED:-false}
     depends_on:
       db:
         condition: service_healthy
+      influxdb:
+        condition: service_healthy
 
 volumes:
-  mysql_data: 
+  mysql_data:
+  influxdb_data: 

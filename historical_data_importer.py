@@ -11,8 +11,23 @@ logger = logging.getLogger(__name__)
 
 class HistoricalDataImporter:
     def __init__(self):
-        self.db = mysql.connector.connect(**DB_CONFIG)
-        self.cursor = self.db.cursor()
+        # MySQL 初始化
+        self.use_mysql = USE_MYSQL
+        if self.use_mysql:
+            self.db = mysql.connector.connect(**MYSQL_CONFIG)
+            self.cursor = self.db.cursor()
+        
+        # InfluxDB 初始化
+        self.use_influxdb = USE_INFLUXDB
+        if self.use_influxdb:
+            from influxdb_client import InfluxDBClient
+            self.influx_client = InfluxDBClient(
+                url=INFLUXDB_CONFIG['url'],
+                token=INFLUXDB_CONFIG['token'],
+                org=INFLUXDB_CONFIG['org']
+            )
+            self.write_api = self.influx_client.write_api()
+
         self.start_date = datetime.strptime(HISTORY_START_DATE, '%Y-%m-%d')
         self.end_date = datetime.now()
 
@@ -36,15 +51,15 @@ class HistoricalDataImporter:
             logger.error(f"数值转换错误 {value}: {e}")
             return value
 
-    def get_historical_data(self, symbol, retries=3):
+    def get_historical_data(self, symbol, start, end, interval, retries=3):
         """获取历史数据，带重试机制"""
         for attempt in range(retries):
             try:
                 data = yf.download(
                     symbol,
-                    start=self.start_date,
-                    end=self.end_date,
-                    interval='1d',
+                    start=start,
+                    end=end,
+                    interval=interval,
                     progress=False
                 )
                 if not data.empty:
@@ -55,9 +70,24 @@ class HistoricalDataImporter:
                     time.sleep(5 * (attempt + 1))  # 递增等待时间
         return None
 
+    def get_data_segments(self):
+        """根据时间跨度返回数据获取分段"""
+        end_date = datetime.now()
+        days_diff = (end_date - self.start_date).days
+        
+        segments = [
+            (self.start_date, min(self.start_date + timedelta(days=60), end_date), '1d'),  # 60天以前的数据
+            (max(end_date - timedelta(days=60), self.start_date), end_date - timedelta(days=7), '1h'),  # 7-60天的数据
+            (end_date - timedelta(days=7), end_date, '1m')  # 最近7天的数据
+        ]
+        
+        # 过滤掉无效的时间段
+        return [(start, end, interval) for start, end, interval in segments if start < end]
+
     def import_historical_exchange_rates(self):
         """导入历史汇率数据"""
         logger.info("开始导入历史汇率数据...")
+        segments = self.get_data_segments()
         
         for currency in CURRENCIES:
             try:
@@ -65,46 +95,58 @@ class HistoricalDataImporter:
                 
                 # 对CNH特殊处理
                 if currency == 'CNH':
-                    # 尝试不同的CNH数据源
+                    symbols_to_try = ['USDCNH=X', 'CNH=F', 'CNHUSD=X']
+                else:
+                    symbols_to_try = [symbol]
+                
+                for segment_start, segment_end, interval in segments:
+                    logger.info(f"获取 {currency} 从 {segment_start} 到 {segment_end} 的 {interval} 数据")
+                    
                     data = None
-                    for symbol_try in ['USDCNH=X', 'CNH=F', 'CNHUSD=X']:
-                        logger.info(f"尝试使用{symbol_try}获取CNH数据...")
-                        data = self.get_historical_data(symbol_try)
+                    for symbol_try in symbols_to_try:
+                        data = self.get_historical_data(symbol_try, segment_start, segment_end, interval)
                         if data is not None and not data.empty:
                             break
-                else:
-                    data = self.get_historical_data(symbol)
-                
-                if data is None or data.empty:
-                    logger.error(f"未能获取到 {currency} 的数据")
-                    continue
-                
-                for index, row in data.iterrows():
-                    try:
-                        date = index.to_pydatetime()
-                        close_price = float(row['Close'].iloc[0]) if hasattr(row['Close'], 'iloc') else float(row['Close'])
-                        rate = self.round_decimal(close_price)
-                        
-                        # 检查是否已存在相同记录
-                        check_query = """SELECT id FROM exchange_rates 
-                                       WHERE timestamp = %s AND from_currency = %s 
-                                       AND to_currency = %s"""
-                        self.cursor.execute(check_query, (date, 'USD', currency))
-                        exists = self.cursor.fetchone()
-                        
-                        if not exists:
-                            query = """INSERT INTO exchange_rates 
-                                     (timestamp, from_currency, to_currency, rate) 
-                                     VALUES (%s, %s, %s, %s)"""
-                            self.cursor.execute(query, (date, 'USD', currency, rate))
-                            self.db.commit()
-                            logger.info(f"导入汇率数据: {date.date()} USD/{currency} - {rate}")
-                        else:
-                            logger.info(f"跳过已存在的记录: {date.date()} USD/{currency}")
-                            
-                    except Exception as e:
-                        logger.error(f"处理{currency}数据时出错: {e}")
+                    
+                    if data is None or data.empty:
+                        logger.error(f"未能获取到 {currency} 的数据")
                         continue
+                    
+                    for index, row in data.iterrows():
+                        try:
+                            timestamp = index.to_pydatetime()
+                            rate = self.round_decimal(float(row['Close']))
+                            
+                            # MySQL写入
+                            if self.use_mysql:
+                                check_query = """SELECT id FROM exchange_rates 
+                                               WHERE timestamp = %s AND from_currency = %s 
+                                               AND to_currency = %s"""
+                                self.cursor.execute(check_query, (timestamp, 'USD', currency))
+                                if not self.cursor.fetchone():
+                                    query = """INSERT INTO exchange_rates 
+                                             (timestamp, from_currency, to_currency, rate) 
+                                             VALUES (%s, %s, %s, %s)"""
+                                    self.cursor.execute(query, (timestamp, 'USD', currency, rate))
+                                    self.db.commit()
+                            
+                            # InfluxDB写入
+                            if self.use_influxdb:
+                                from influxdb_client import Point
+                                point = Point("exchange_rates") \
+                                    .tag("from_currency", "USD") \
+                                    .tag("to_currency", currency) \
+                                    .field("rate", rate) \
+                                    .time(timestamp)
+                                self.write_api.write(bucket=INFLUXDB_CONFIG['bucket'], record=point)
+                            
+                            logger.info(f"导入汇率数据: {timestamp} USD/{currency} - {rate}")
+                            
+                        except Exception as e:
+                            logger.error(f"处理{currency}数据时出错: {e}")
+                            continue
+                    
+                    time.sleep(1)  # 短暂暂停避免请求过快
                 
                 logger.info(f"完成货币 {currency} 的历史数据导入")
                 time.sleep(2)  # 避免请求过于频繁
@@ -116,53 +158,67 @@ class HistoricalDataImporter:
     def import_historical_stock_prices(self):
         """导入历史股票数据"""
         logger.info("开始导入历史股票数据...")
+        segments = self.get_data_segments()
         
         for market, symbols in STOCKS.items():
             for symbol in symbols:
                 try:
                     # 修正股票代码格式
                     if market == 'HK':
-                        yf_symbol = "^HSI"  # 恒生指数特殊处理
+                        yf_symbol = "^HSI"
                     elif market == 'CN':
-                        if symbol == '000001.SS':
-                            yf_symbol = '000001.SS'  # 上证指数
-                        elif symbol == '399001.SZ':
-                            yf_symbol = '399001.SZ'  # 深证成指
-                        elif symbol == '899050.BJ':
-                            yf_symbol = '899050.BJ'  # 北证50
+                        yf_symbol = symbol
                     else:
                         yf_symbol = symbol
                     
-                    data = self.get_historical_data(yf_symbol)
-                    
-                    for index, row in data.iterrows():
-                        try:
-                            date = index.to_pydatetime()
-                            close_price = float(row['Close'].iloc[0]) if hasattr(row['Close'], 'iloc') else float(row['Close'])
-                            price = self.round_decimal(close_price)
-                            volume = int(row['Volume'].iloc[0]) if hasattr(row['Volume'], 'iloc') else int(row['Volume'])
-                            currency = 'USD' if market == 'US' else 'HKD' if market == 'HK' else 'CNY'
-                            
-                            # 检查是否已存在相同记录
-                            check_query = """SELECT id FROM stock_prices 
-                                           WHERE timestamp = %s AND market = %s 
-                                           AND symbol = %s"""
-                            self.cursor.execute(check_query, (date, market, symbol))
-                            exists = self.cursor.fetchone()
-                            
-                            if not exists:
-                                query = """INSERT INTO stock_prices 
-                                         (timestamp, market, symbol, price, currency, volume) 
-                                         VALUES (%s, %s, %s, %s, %s, %s)"""
-                                self.cursor.execute(query, (date, market, symbol, price, currency, volume))
-                                self.db.commit()
-                                logger.info(f"导入股票数据: {date.date()} {market}:{symbol} - {price} {currency}")
-                            else:
-                                logger.info(f"跳过已存在的记录: {date.date()} {market}:{symbol}")
-                                
-                        except Exception as e:
-                            logger.error(f"处理股票数据时出错 {market}:{symbol}: {e}")
+                    for segment_start, segment_end, interval in segments:
+                        logger.info(f"获取 {market}:{symbol} 从 {segment_start} 到 {segment_end} 的 {interval} 数据")
+                        data = self.get_historical_data(yf_symbol, segment_start, segment_end, interval)
+                        
+                        if data is None or data.empty:
+                            logger.error(f"未能获取到 {market}:{symbol} 的数据")
                             continue
+                        
+                        currency = 'USD' if market == 'US' else 'HKD' if market == 'HK' else 'CNY'
+                        
+                        for index, row in data.iterrows():
+                            try:
+                                timestamp = index.to_pydatetime()
+                                price = self.round_decimal(float(row['Close']))
+                                volume = int(row['Volume']) if 'Volume' in row else 0
+                                
+                                # MySQL写入
+                                if self.use_mysql:
+                                    check_query = """SELECT id FROM stock_prices 
+                                                   WHERE timestamp = %s AND market = %s 
+                                                   AND symbol = %s"""
+                                    self.cursor.execute(check_query, (timestamp, market, symbol))
+                                    if not self.cursor.fetchone():
+                                        query = """INSERT INTO stock_prices 
+                                                 (timestamp, market, symbol, price, currency, volume) 
+                                                 VALUES (%s, %s, %s, %s, %s, %s)"""
+                                        self.cursor.execute(query, (timestamp, market, symbol, price, currency, volume))
+                                        self.db.commit()
+                                
+                                # InfluxDB写入
+                                if self.use_influxdb:
+                                    from influxdb_client import Point
+                                    point = Point("stock_prices") \
+                                        .tag("market", market) \
+                                        .tag("symbol", symbol) \
+                                        .tag("currency", currency) \
+                                        .field("price", price) \
+                                        .field("volume", volume) \
+                                        .time(timestamp)
+                                    self.write_api.write(bucket=INFLUXDB_CONFIG['bucket'], record=point)
+                                
+                                logger.info(f"导入股票数据: {timestamp} {market}:{symbol} - {price} {currency}")
+                                
+                            except Exception as e:
+                                logger.error(f"处理股票数据时出错 {market}:{symbol}: {e}")
+                                continue
+                        
+                        time.sleep(1)  # 短暂暂停避免请求过快
                     
                     logger.info(f"完成股票 {market}:{symbol} 的历史数据导入")
                     time.sleep(2)
@@ -174,39 +230,46 @@ class HistoricalDataImporter:
     def import_historical_usd_index(self):
         """导入历史美元指数数据"""
         logger.info("开始导入历史美元指数数据...")
+        segments = self.get_data_segments()
         
         try:
-            # 使用欧元兑美元的历史数据来计算美元指数
-            data = self.get_historical_data('EURUSD=X')
-            
-            if data is not None and not data.empty:
-                for index, row in data.iterrows():
-                    try:
-                        date = index.to_pydatetime()
-                        eur_usd_rate = float(row['Close'].iloc[0]) if hasattr(row['Close'], 'iloc') else float(row['Close'])
-                        # 使用EUR/USD汇率的倒数乘以标准系数来计算美元指数
-                        usd_index = self.round_decimal((1 / eur_usd_rate) * 88.3)
-                        
-                        # 检查是否已存在相同记录
-                        check_query = "SELECT id FROM usd_index WHERE timestamp = %s"
-                        self.cursor.execute(check_query, (date,))
-                        exists = self.cursor.fetchone()
-                        
-                        if not exists:
-                            query = "INSERT INTO usd_index (timestamp, value) VALUES (%s, %s)"
-                            self.cursor.execute(query, (date, usd_index))
-                            self.db.commit()
-                            logger.info(f"导入美元指数数据: {date.date()} - {usd_index}")
-                        else:
-                            logger.info(f"跳过已存在的记录: {date.date()}")
-                            
-                    except Exception as e:
-                        logger.error(f"处理美元指数数据时出错 {date}: {e}")
-                        continue
+            for segment_start, segment_end, interval in segments:
+                logger.info(f"获取美元指数从 {segment_start} 到 {segment_end} 的 {interval} 数据")
+                data = self.get_historical_data('EURUSD=X', segment_start, segment_end, interval)
                 
-                logger.info("完成美元指数历史数据导入")
-            else:
-                logger.error("未能获取到美元指数历史数据")
+                if data is not None and not data.empty:
+                    for index, row in data.iterrows():
+                        try:
+                            timestamp = index.to_pydatetime()
+                            eur_usd_rate = float(row['Close'])
+                            usd_index = self.round_decimal((1 / eur_usd_rate) * 88.3)
+                            
+                            # MySQL写入
+                            if self.use_mysql:
+                                check_query = "SELECT id FROM usd_index WHERE timestamp = %s"
+                                self.cursor.execute(check_query, (timestamp,))
+                                if not self.cursor.fetchone():
+                                    query = "INSERT INTO usd_index (timestamp, value) VALUES (%s, %s)"
+                                    self.cursor.execute(query, (timestamp, usd_index))
+                                    self.db.commit()
+                            
+                            # InfluxDB写入
+                            if self.use_influxdb:
+                                from influxdb_client import Point
+                                point = Point("usd_index") \
+                                    .field("value", usd_index) \
+                                    .time(timestamp)
+                                self.write_api.write(bucket=INFLUXDB_CONFIG['bucket'], record=point)
+                            
+                            logger.info(f"导入美元指数数据: {timestamp} - {usd_index}")
+                            
+                        except Exception as e:
+                            logger.error(f"处理美元指数数据时出错 {timestamp}: {e}")
+                            continue
+                    
+                    time.sleep(1)  # 短暂暂停避免请求过快
+                
+                logger.info(f"完成时间段 {segment_start} 到 {segment_end} 的美元指数数据导入")
             
         except Exception as e:
             logger.error(f"导入美元指数历史数据失败: {e}")
@@ -217,6 +280,17 @@ class HistoricalDataImporter:
         self.import_historical_exchange_rates()
         self.import_historical_stock_prices()
         logger.info("历史数据导入完成")
+
+    def __del__(self):
+        """清理资源"""
+        if hasattr(self, 'cursor') and self.cursor:
+            self.cursor.close()
+        if hasattr(self, 'db') and self.db:
+            self.db.close()
+        if hasattr(self, 'write_api') and self.write_api:
+            self.write_api.close()
+        if hasattr(self, 'influx_client') and self.influx_client:
+            self.influx_client.close()
 
 if __name__ == "__main__":
     importer = HistoricalDataImporter()

@@ -1,4 +1,5 @@
 requests>=2.31.0
 mysql-connector-python>=8.0.33
 yfinance>=0.2.36
-investpy>=1.0.8 
+investpy>=1.0.8
+influxdb-client>=1.36.0 

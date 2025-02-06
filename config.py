@@ -2,11 +2,23 @@ import os
 import json
 
 # 数据库配置
-DB_CONFIG = {
+MYSQL_CONFIG = {
     'host': os.environ.get('DB_HOST', 'localhost'),
     'user': os.environ.get('DB_USER', 'root'),
     'password': os.environ.get('DB_PASSWORD', ''),
     'database': os.environ.get('DB_NAME', 'market_data')
+}
+
+# 数据库开关
+USE_MYSQL = os.environ.get('USE_MYSQL', 'true').lower() == 'true'
+USE_INFLUXDB = os.environ.get('USE_INFLUXDB', 'false').lower() == 'true'
+
+# InfluxDB配置
+INFLUXDB_CONFIG = {
+    'url': os.environ.get('INFLUXDB_URL', 'http://192.168.6.135:8086'),
+    'token': os.environ.get('INFLUXDB_TOKEN', 'BzxenmJ17wCEcyCDydUI-LKkolBXpbFJ0jsMT5cyOZz8xHJNcUlM1SOkwVfIkGjSd9sxxQE-opTTvudWjTOI2w=='),
+    'org': os.environ.get('INFLUXDB_ORG', 'rxrw'),
+    'bucket': os.environ.get('INFLUXDB_BUCKET', 'rate')
 }
 
 # 从环境变量获取货币配置，默认值使用JSON格式
@@ -30,4 +42,7 @@ STOCKS = json.loads(os.environ.get('STOCKS', json.dumps(DEFAULT_STOCKS)))
 
 # 其他配置
 FETCH_INTERVAL = int(os.environ.get('FETCH_INTERVAL', 3600))
-HISTORY_START_DATE = os.environ.get('HISTORY_START_DATE', '2017-07-01') 
+HISTORY_START_DATE = os.environ.get('HISTORY_START_DATE', '2017-07-01')
+
+# 添加历史数据配置
+HISTORY_FETCH_ENABLED = os.environ.get('HISTORY_FETCH_ENABLED', 'false').lower() == 'true' 

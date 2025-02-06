@@ -11,8 +11,20 @@ logger = logging.getLogger(__name__)
 
 class MarketDataCollector:
     def __init__(self):
-        self.db = mysql.connector.connect(**DB_CONFIG)
-        self.cursor = self.db.cursor()
+        self.use_mysql = USE_MYSQL
+        if self.use_mysql:
+            self.db = mysql.connector.connect(**MYSQL_CONFIG)
+            self.cursor = self.db.cursor()
+        
+        self.use_influxdb = USE_INFLUXDB
+        if self.use_influxdb:
+            from influxdb_client import InfluxDBClient
+            self.influx_client = InfluxDBClient(
+                url=INFLUXDB_CONFIG['url'],
+                token=INFLUXDB_CONFIG['token'],
+                org=INFLUXDB_CONFIG['org']
+            )
+            self.write_api = self.influx_client.write_api()
 
     def round_decimal(self, value, places=6):
         """智能四舍五入处理数值"""
@@ -49,7 +61,7 @@ class MarketDataCollector:
                 data = yf.download(
                     symbol, 
                     period='1d', 
-                    interval='1m', 
+                    interval='15m',  # 修改为15分钟间隔
                     progress=False
                 )
                 if not data.empty:
@@ -61,23 +73,95 @@ class MarketDataCollector:
             except Exception as e:
                 logger.error(f"第{attempt + 1}次获取{symbol}数据失败: {e}")
                 if attempt < retries - 1:
-                    time.sleep(5 * (attempt + 1))  # 递增等待时间
+                    time.sleep(5 * (attempt + 1))
         return None
+
+    def write_to_mysql(self, query, params, retries=3):
+        """MySQL写入，带重试机制"""
+        if not self.use_mysql:
+            return
+            
+        for attempt in range(retries):
+            try:
+                self.cursor.execute(query, params)
+                self.db.commit()
+                return True
+            except mysql.connector.Error as e:
+                logger.error(f"MySQL写入错误 (尝试 {attempt + 1}/{retries}): {e}")
+                if attempt < retries - 1:
+                    try:
+                        self.db.ping(reconnect=True)  # 尝试重连
+                        time.sleep(1 * (attempt + 1))  # 递增等待时间
+                    except Exception as e:
+                        logger.error(f"MySQL重连失败: {e}")
+                else:
+                    logger.error("MySQL写入最终失败")
+                    return False
+        return False
+
+    def write_to_influxdb(self, measurement, tags, fields, timestamp, retries=3):
+        """写入数据到InfluxDB，带重试机制"""
+        if not self.use_influxdb:
+            return False
+            
+        for attempt in range(retries):
+            try:
+                from influxdb_client import Point
+                point = Point(measurement)
+                
+                # 添加所有标签
+                for tag_key, tag_value in tags.items():
+                    point = point.tag(tag_key, tag_value)
+                
+                # 添加所有字段
+                for field_key, field_value in fields.items():
+                    point = point.field(field_key, field_value)
+                
+                # 设置时间戳
+                point = point.time(timestamp)
+                
+                # 写入数据
+                self.write_api.write(
+                    bucket=INFLUXDB_CONFIG['bucket'],
+                    record=point
+                )
+                return True
+            except Exception as e:
+                logger.error(f"InfluxDB写入错误 (尝试 {attempt + 1}/{retries}): {e}")
+                if attempt < retries - 1:
+                    time.sleep(1 * (attempt + 1))
+                else:
+                    logger.error("InfluxDB写入最终失败")
+                    return False
+        return False
 
     def fetch_usd_index(self):
         """获取美元指数"""
         try:
-            # 使用EUR/USD来计算美元指数
             data = self.get_latest_data('EURUSD=X')
             if data is not None:
                 rate = data['Close']
-                # 使用EUR/USD汇率的倒数乘以标准系数来近似美元指数
                 usd_index = self.round_decimal((1 / rate) * 88.3)
+                timestamp = datetime.now()
                 
-                query = "INSERT INTO usd_index (timestamp, value) VALUES (%s, %s)"
-                self.cursor.execute(query, (datetime.now(), usd_index))
-                self.db.commit()
-                logger.info(f"USD Index updated: {usd_index}")
+                # MySQL写入
+                mysql_success = self.write_to_mysql(
+                    "INSERT INTO usd_index (timestamp, value) VALUES (%s, %s)",
+                    (timestamp, usd_index)
+                )
+                
+                # InfluxDB写入
+                influx_success = self.write_to_influxdb(
+                    measurement="usd_index",
+                    tags={},
+                    fields={"value": usd_index},
+                    timestamp=timestamp
+                )
+                
+                if mysql_success or influx_success:
+                    logger.info(f"USD Index updated: {usd_index}")
+                else:
+                    logger.error("USD Index 更新失败：所有数据库写入都失败了")
         except Exception as e:
             logger.error(f"Error fetching USD index: {e}")
 
@@ -98,15 +182,33 @@ class MarketDataCollector:
                 
                 if data is not None:
                     rate = self.round_decimal(data['Close'])
+                    timestamp = datetime.now()
                     
-                    query = "INSERT INTO exchange_rates (timestamp, from_currency, to_currency, rate) VALUES (%s, %s, %s, %s)"
-                    self.cursor.execute(query, (datetime.now(), 'USD', currency, rate))
-                    self.db.commit()
-                    logger.info(f"Exchange rate updated for USD/{currency}: {rate}")
+                    # MySQL写入
+                    mysql_success = self.write_to_mysql(
+                        "INSERT INTO exchange_rates (timestamp, from_currency, to_currency, rate) VALUES (%s, %s, %s, %s)",
+                        (timestamp, 'USD', currency, rate)
+                    )
+                    
+                    # InfluxDB写入
+                    influx_success = self.write_to_influxdb(
+                        measurement="exchange_rates",
+                        tags={
+                            "from_currency": "USD",
+                            "to_currency": currency
+                        },
+                        fields={"rate": rate},
+                        timestamp=timestamp
+                    )
+                    
+                    if mysql_success or influx_success:
+                        logger.info(f"Exchange rate updated for USD/{currency}: {rate}")
+                    else:
+                        logger.error(f"Exchange rate 更新失败 USD/{currency}: 所有数据库写入都失败了")
                 else:
                     logger.error(f"未能获取到 {currency} 的数据")
                 
-                time.sleep(2)  # 避免请求过于频繁
+                time.sleep(2)
             except Exception as e:
                 logger.error(f"Error fetching exchange rate for {currency}: {e}")
 
@@ -133,13 +235,35 @@ class MarketDataCollector:
                         price = self.round_decimal(data['Close'])
                         volume = data['Volume']
                         currency = 'USD' if market == 'US' else 'HKD' if market == 'HK' else 'CNY'
+                        timestamp = datetime.now()
                         
-                        query = """INSERT INTO stock_prices 
-                                  (timestamp, market, symbol, price, currency, volume) 
-                                  VALUES (%s, %s, %s, %s, %s, %s)"""
-                        self.cursor.execute(query, (datetime.now(), market, symbol, price, currency, volume))
-                        self.db.commit()
-                        logger.info(f"Stock index updated for {market}:{symbol}: {price} {currency}")
+                        # MySQL写入
+                        mysql_success = self.write_to_mysql(
+                            """INSERT INTO stock_prices 
+                               (timestamp, market, symbol, price, currency, volume) 
+                               VALUES (%s, %s, %s, %s, %s, %s)""",
+                            (timestamp, market, symbol, price, currency, volume)
+                        )
+                        
+                        # InfluxDB写入
+                        influx_success = self.write_to_influxdb(
+                            measurement="stock_prices",
+                            tags={
+                                "market": market,
+                                "symbol": symbol,
+                                "currency": currency
+                            },
+                            fields={
+                                "price": price,
+                                "volume": volume
+                            },
+                            timestamp=timestamp
+                        )
+                        
+                        if mysql_success or influx_success:
+                            logger.info(f"Stock index updated for {market}:{symbol}: {price} {currency}")
+                        else:
+                            logger.error(f"Stock index 更新失败 {market}:{symbol}: 所有数据库写入都失败了")
                     
                     time.sleep(2)
                 except Exception as e:
@@ -147,18 +271,152 @@ class MarketDataCollector:
 
     def fetch_historical_data(self, start_date):
         """获取历史数据"""
-        # 这里需要使用不同的API endpoint来获取历史数据
-        # 实现逻辑类似，但使用时间序列API
-        pass
+        try:
+            end_date = datetime.now()
+            start_datetime = datetime.strptime(start_date, '%Y-%m-%d')
+            days_diff = (end_date - start_datetime).days
+            
+            # 根据时间跨度确定数据间隔
+            def get_interval(days):
+                if days <= 7:  # 7天内用15分钟
+                    return '15m'
+                elif days <= 60:  # 60天内用1小时
+                    return '1h'
+                else:  # 超过60天用天级别
+                    return '1d'
+            
+            # 分段获取数据
+            segments = [
+                (start_datetime, min(start_datetime + timedelta(days=60), end_date), '1d'),  # 60天以前的数据
+                (max(end_date - timedelta(days=60), start_datetime), end_date - timedelta(days=7), '1h'),  # 7-60天的数据
+                (end_date - timedelta(days=7), end_date, '15m')  # 最近7天的数据
+            ]
+            
+            # 过滤掉无效的时间段
+            segments = [(start, end, interval) for start, end, interval in segments if start < end]
 
-    def run(self):
+            for currency in CURRENCIES:
+                symbol = f'USD{currency}=X'
+                
+                for start, end, interval in segments:
+                    logger.info(f"获取 {symbol} 从 {start} 到 {end} 的 {interval} 数据")
+                    data = yf.download(
+                        symbol,
+                        start=start,
+                        end=end,
+                        interval=interval
+                    )
+                    
+                    for timestamp, row in data.iterrows():
+                        rate = self.round_decimal(row['Close'])
+                        
+                        # MySQL写入
+                        if self.use_mysql:
+                            query = "INSERT INTO exchange_rates (timestamp, from_currency, to_currency, rate) VALUES (%s, %s, %s, %s)"
+                            self.cursor.execute(query, (timestamp, 'USD', currency, rate))
+                            self.db.commit()
+                        
+                        # InfluxDB写入
+                        self.write_to_influxdb(
+                            measurement="exchange_rates",
+                            tags={
+                                "from_currency": "USD",
+                                "to_currency": currency
+                            },
+                            fields={"rate": rate},
+                            timestamp=timestamp
+                        )
+                    
+                    time.sleep(1)  # 短暂暂停避免请求过快
+                
+                logger.info(f"历史汇率数据已导入: USD/{currency}")
+                time.sleep(2)  # 避免请求过于频繁
+
+            # 获取股票历史数据
+            for market, symbols in STOCKS.items():
+                for symbol in symbols:
+                    if market == 'HK':
+                        yf_symbol = "^HSI"
+                    elif market == 'CN':
+                        yf_symbol = symbol
+                    else:
+                        yf_symbol = symbol
+                    
+                    for start, end, interval in segments:
+                        logger.info(f"获取 {market}:{symbol} 从 {start} 到 {end} 的 {interval} 数据")
+                        data = yf.download(
+                            yf_symbol,
+                            start=start,
+                            end=end,
+                            interval=interval
+                        )
+                        
+                        currency = 'USD' if market == 'US' else 'HKD' if market == 'HK' else 'CNY'
+                        
+                        for timestamp, row in data.iterrows():
+                            price = self.round_decimal(row['Close'])
+                            volume = int(row['Volume']) if 'Volume' in row else 0
+                            
+                            # MySQL写入
+                            if self.use_mysql:
+                                query = """INSERT INTO stock_prices 
+                                         (timestamp, market, symbol, price, currency, volume) 
+                                         VALUES (%s, %s, %s, %s, %s, %s)"""
+                                self.cursor.execute(query, (timestamp, market, symbol, price, currency, volume))
+                                self.db.commit()
+                            
+                            # InfluxDB写入
+                            self.write_to_influxdb(
+                                measurement="stock_prices",
+                                tags={
+                                    "market": market,
+                                    "symbol": symbol,
+                                    "currency": currency
+                                },
+                                fields={
+                                    "price": price,
+                                    "volume": volume
+                                },
+                                timestamp=timestamp
+                            )
+                        
+                        time.sleep(1)  # 短暂暂停避免请求过快
+                    
+                    logger.info(f"历史股票数据已导入: {market}:{symbol}")
+                    time.sleep(2)  # 避免请求过于频繁
+
+        except Exception as e:
+            logger.error(f"获取历史数据时发生错误: {e}")
+
+    def run(self, fetch_historical=False):
         """主运行循环"""
-        while True:
-            self.fetch_usd_index()
-            self.fetch_exchange_rates()
-            self.fetch_stock_prices()
-            time.sleep(FETCH_INTERVAL)
+        try:
+            if fetch_historical:
+                logger.info("开始获取历史数据...")
+                self.fetch_historical_data(HISTORY_START_DATE)
+                logger.info("历史数据获取完成")
+            
+            while True:
+                self.fetch_usd_index()
+                self.fetch_exchange_rates()
+                self.fetch_stock_prices()
+                time.sleep(FETCH_INTERVAL)
+        except KeyboardInterrupt:
+            logger.info("程序正在退出...")
+        except Exception as e:
+            logger.error(f"运行时发生错误: {e}")
+
+    def __del__(self):
+        """清理资源"""
+        if hasattr(self, 'cursor') and self.cursor:
+            self.cursor.close()
+        if hasattr(self, 'db') and self.db:
+            self.db.close()
+        if hasattr(self, 'write_api') and self.write_api:
+            self.write_api.close()
+        if hasattr(self, 'influx_client') and self.influx_client:
+            self.influx_client.close()
 
 if __name__ == "__main__":
     collector = MarketDataCollector()
-    collector.run() 
+    collector.run(fetch_historical=HISTORY_FETCH_ENABLED) 

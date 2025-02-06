@@ -45,4 +45,7 @@ FETCH_INTERVAL = int(os.environ.get('FETCH_INTERVAL', 3600))
 HISTORY_START_DATE = os.environ.get('HISTORY_START_DATE', '2017-07-01')
 
 # 添加历史数据配置
-HISTORY_FETCH_ENABLED = os.environ.get('HISTORY_FETCH_ENABLED', 'false').lower() == 'true' 
+HISTORY_FETCH_ENABLED = os.environ.get('HISTORY_FETCH_ENABLED', 'false').lower() == 'true'
+
+# 历史数据导入开关
+IMPORT_HISTORY = os.environ.get('IMPORT_HISTORY', 'false').lower() == 'true' 

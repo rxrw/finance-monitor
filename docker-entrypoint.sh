@@ -7,12 +7,14 @@ do
     sleep 1
 done
 
-# 导入历史数据
-echo "Importing historical data..."
-python historical_data_importer.py
+# 根据环境变量决定是否导入历史数据
+if [ "$IMPORT_HISTORY" = "true" ]; then
+    echo "Importing historical data..."
+    python historical_data_importer.py
+else
+    echo "Skipping historical data import..."
+fi
 
-# 如果是实时采集模式，则启动采集器
-if [ "$1" != "historical" ]; then
-    echo "Running real-time data collector..."
-    python market_data_collector.py
-fi 
+# 启动实时数据采集器
+echo "Running real-time data collector..."
+python market_data_collector.py 

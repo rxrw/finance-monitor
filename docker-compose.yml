@@ -52,6 +52,7 @@ services:
       FETCH_INTERVAL: ${FETCH_INTERVAL:-900}
       HISTORY_START_DATE: ${HISTORY_START_DATE:-2017-07-01}
       HISTORY_FETCH_ENABLED: ${HISTORY_FETCH_ENABLED:-false}
+      IMPORT_HISTORY: ${IMPORT_HISTORY:-false}
     depends_on:
       db:
         condition: service_healthy

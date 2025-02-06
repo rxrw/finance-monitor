@@ -1,6 +1,6 @@
 import yfinance as yf
 import mysql.connector
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import logging
 from config import *
 import time
@@ -28,8 +28,9 @@ class HistoricalDataImporter:
             )
             self.write_api = self.influx_client.write_api()
 
-        self.start_date = datetime.strptime(HISTORY_START_DATE, '%Y-%m-%d')
-        self.end_date = datetime.now()
+        # 确保起始日期是 UTC 时间
+        self.start_date = datetime.strptime(HISTORY_START_DATE, '%Y-%m-%d').replace(tzinfo=timezone.utc)
+        self.end_date = datetime.now(timezone.utc)
 
     def round_decimal(self, value, places=4):
         """智能四舍五入处理数值"""
@@ -70,41 +71,47 @@ class HistoricalDataImporter:
                     start=start,
                     end=end,
                     interval=interval,
-                    progress=False
+                    progress=False,
+                    ignore_tz=True
                 )
                 if not data.empty:
+                    # 转换为UTC时间
+                    data.index = data.index.tz_localize('UTC')
                     return data
             except Exception as e:
                 logger.error(f"第{attempt + 1}次获取{symbol}数据失败: {e}")
                 if attempt < retries - 1:
-                    time.sleep(5 * (attempt + 1))  # 递增等待时间
+                    time.sleep(5 * (attempt + 1))
         return None
 
     def get_data_segments(self):
         """根据时间跨度返回数据获取分段"""
-        end_date = datetime.now()
+        end_date = datetime.now(timezone.utc)  # 使用 UTC 时间
         
         # 计算时间段
         recent_7d = end_date - timedelta(days=7)
         recent_60d = end_date - timedelta(days=60)
         
+        # 确保起始日期也是 UTC 时间
+        start_date_utc = self.start_date.replace(tzinfo=timezone.utc)
+        
         segments = []
         
         # 如果起始日期早于60天前，添加日级别数据段
-        if self.start_date < recent_60d:
-            segments.append((self.start_date, recent_60d, '1d'))  # 60天以前的数据用天级别
+        if start_date_utc < recent_60d:
+            segments.append((start_date_utc, recent_60d, '1d'))  # 60天以前的数据用天级别
         
         # 如果起始日期早于或在最近60天内，添加小时级别数据段
-        if self.start_date < recent_7d:
-            start = max(self.start_date, recent_60d)
+        if start_date_utc < recent_7d:
+            start = max(start_date_utc, recent_60d)
             segments.append((start, recent_7d, '1h'))  # 7-60天的数据用小时级别
         
         # 如果起始日期早于或在最近7天内，添加分钟级别数据段
-        if self.start_date < end_date:
-            start = max(self.start_date, recent_7d)
+        if start_date_utc < end_date:
+            start = max(start_date_utc, recent_7d)
             segments.append((start, end_date, '1m'))  # 最近7天的数据用分钟级别
         
-        # 过滤掉无效的时间段（结束时间早于开始时间的段）
+        # 过滤掉无效的时间段
         return [(start, end, interval) for start, end, interval in segments if start < end]
 
     def import_historical_exchange_rates(self):

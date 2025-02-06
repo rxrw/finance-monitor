@@ -61,12 +61,16 @@ class MarketDataCollector:
                 data = yf.download(
                     symbol, 
                     period='1d', 
-                    interval='15m',  # 修改为15分钟间隔
-                    progress=False
+                    interval='15m',
+                    progress=False,
+                    ignore_tz=True
                 )
                 if not data.empty:
                     latest = data.iloc[-1]
+                    # 转换为UTC时间
+                    timestamp = data.index[-1].tz_localize('UTC')
                     return {
+                        'timestamp': timestamp,
                         'Close': float(latest['Close'].iloc[0]) if hasattr(latest['Close'], 'iloc') else float(latest['Close']),
                         'Volume': int(latest['Volume'].iloc[0]) if hasattr(latest['Volume'], 'iloc') else int(latest['Volume']) if 'Volume' in latest else 0
                     }
@@ -102,6 +106,7 @@ class MarketDataCollector:
     def write_to_influxdb(self, measurement, tags, fields, timestamp, retries=3):
         """写入数据到InfluxDB，带重试机制"""
         if not self.use_influxdb:
+            logger.info("InfluxDB写入已禁用")
             return False
             
         for attempt in range(retries):
@@ -120,14 +125,20 @@ class MarketDataCollector:
                 # 设置时间戳
                 point = point.time(timestamp)
                 
+                logger.info(f"正在写入InfluxDB: measurement={measurement}, tags={tags}, fields={fields}, timestamp={timestamp}")
+                
                 # 写入数据
                 self.write_api.write(
                     bucket=INFLUXDB_CONFIG['bucket'],
                     record=point
                 )
+                
+                logger.info(f"InfluxDB写入成功: {measurement}")
                 return True
+                
             except Exception as e:
                 logger.error(f"InfluxDB写入错误 (尝试 {attempt + 1}/{retries}): {e}")
+                logger.error(f"详细信息: measurement={measurement}, tags={tags}, fields={fields}, timestamp={timestamp}")
                 if attempt < retries - 1:
                     time.sleep(1 * (attempt + 1))
                 else:
@@ -142,7 +153,7 @@ class MarketDataCollector:
             if data is not None:
                 rate = data['Close']
                 usd_index = self.round_decimal((1 / rate) * 88.3)
-                timestamp = datetime.now()
+                timestamp = data['timestamp']  # 使用数据的实际时间戳
                 
                 # MySQL写入
                 mysql_success = self.write_to_mysql(
@@ -182,7 +193,7 @@ class MarketDataCollector:
                 
                 if data is not None:
                     rate = self.round_decimal(data['Close'])
-                    timestamp = datetime.now()
+                    timestamp = data['timestamp']  # 使用数据的实际时间戳
                     
                     # MySQL写入
                     mysql_success = self.write_to_mysql(
@@ -235,7 +246,7 @@ class MarketDataCollector:
                         price = self.round_decimal(data['Close'])
                         volume = data['Volume']
                         currency = 'USD' if market == 'US' else 'HKD' if market == 'HK' else 'CNY'
-                        timestamp = datetime.now()
+                        timestamp = data['timestamp']  # 使用数据的实际时间戳
                         
                         # MySQL写入
                         mysql_success = self.write_to_mysql(

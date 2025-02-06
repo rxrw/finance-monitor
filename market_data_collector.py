@@ -58,22 +58,61 @@ class MarketDataCollector:
         """获取最新数据，带重试机制"""
         for attempt in range(retries):
             try:
-                data = yf.download(
-                    symbol, 
-                    period='1d', 
-                    interval='15m',
-                    progress=False,
-                    ignore_tz=True
-                )
-                if not data.empty:
-                    latest = data.iloc[-1]
-                    # 转换为UTC时间
-                    timestamp = data.index[-1].tz_localize('UTC')
-                    return {
-                        'timestamp': timestamp,
-                        'Close': float(latest['Close'].iloc[0]) if hasattr(latest['Close'], 'iloc') else float(latest['Close']),
-                        'Volume': int(latest['Volume'].iloc[0]) if hasattr(latest['Volume'], 'iloc') else int(latest['Volume']) if 'Volume' in latest else 0
-                    }
+                # 对于货币对特殊处理
+                if symbol.endswith('=X'):
+                    # 尝试不同的符号格式
+                    symbols_to_try = [symbol]
+                    if symbol.startswith('USD'):
+                        alt_symbol = f"{symbol[3:6]}USD=X"
+                        symbols_to_try.append(alt_symbol)
+                    
+                    # 尝试不同的时间间隔
+                    intervals = ['1m', '5m', '1h']
+                    
+                    for sym in symbols_to_try:
+                        for interval in intervals:
+                            try:
+                                data = yf.download(
+                                    sym, 
+                                    period='1d', 
+                                    interval=interval,
+                                    progress=False,
+                                    ignore_tz=True
+                                )
+                                if not data.empty:
+                                    latest = data.iloc[-1]
+                                    timestamp = data.index[-1].tz_localize('UTC')
+                                    close_price = float(latest['Close'].iloc[0]) if hasattr(latest['Close'], 'iloc') else float(latest['Close'])
+                                    # 如果是反转的符号，需要取倒数
+                                    if sym != symbol:
+                                        close_price = 1 / close_price
+                                    return {
+                                        'timestamp': timestamp,
+                                        'Close': close_price,
+                                        'Volume': int(latest['Volume'].iloc[0]) if hasattr(latest['Volume'], 'iloc') else int(latest['Volume']) if 'Volume' in latest else 0
+                                    }
+                            except Exception as e:
+                                logger.warning(f"使用间隔 {interval} 获取 {sym} 失败: {e}")
+                                continue
+                else:
+                    # 非货币对的正常处理
+                    data = yf.download(
+                        symbol, 
+                        period='1d', 
+                        interval='1m',
+                        progress=False,
+                        ignore_tz=True
+                    )
+                    if not data.empty:
+                        latest = data.iloc[-1]
+                        timestamp = data.index[-1].tz_localize('UTC')
+                        return {
+                            'timestamp': timestamp,
+                            'Close': float(latest['Close'].iloc[0]) if hasattr(latest['Close'], 'iloc') else float(latest['Close']),
+                            'Volume': int(latest['Volume'].iloc[0]) if hasattr(latest['Volume'], 'iloc') else int(latest['Volume']) if 'Volume' in latest else 0
+                        }
+                
+                logger.error(f"未能获取到 {symbol} 的数据")
             except Exception as e:
                 logger.error(f"第{attempt + 1}次获取{symbol}数据失败: {e}")
                 if attempt < retries - 1:
@@ -280,6 +319,61 @@ class MarketDataCollector:
                 except Exception as e:
                     logger.error(f"Error fetching stock index for {market}:{symbol}: {e}")
 
+    def get_historical_data(self, symbol, start, end, interval, retries=3):
+        """获取历史数据，带重试机制"""
+        for attempt in range(retries):
+            try:
+                # 对于货币对，尝试反转符号
+                if symbol.endswith('=X'):
+                    symbols_to_try = [symbol]
+                    # 如果是 USDXXX=X 格式，也尝试 XXXUSD=X 格式
+                    if symbol.startswith('USD'):
+                        alt_symbol = f"{symbol[3:6]}USD=X"
+                        symbols_to_try.append(alt_symbol)
+                    
+                    for sym in symbols_to_try:
+                        try:
+                            data = yf.download(
+                                sym,
+                                start=start,
+                                end=end,
+                                interval=interval,
+                                progress=False,
+                                ignore_tz=True
+                            )
+                            if not data.empty:
+                                # 如果是反转的符号，需要取倒数
+                                if sym != symbol:
+                                    data['Close'] = 1 / data['Close']
+                                data.index = data.index.tz_localize('UTC')
+                                return data
+                        except Exception as e:
+                            logger.warning(f"尝试符号 {sym} 失败: {e}")
+                            continue
+                else:
+                    data = yf.download(
+                        symbol,
+                        start=start,
+                        end=end,
+                        interval=interval,
+                        progress=False,
+                        ignore_tz=True
+                    )
+                    if not data.empty:
+                        data.index = data.index.tz_localize('UTC')
+                        return data
+                
+                if attempt < retries - 1:
+                    time.sleep(5 * (attempt + 1))
+                    
+            except Exception as e:
+                logger.error(f"第{attempt + 1}次获取{symbol}数据失败: {e}")
+                if attempt < retries - 1:
+                    time.sleep(5 * (attempt + 1))
+        
+        logger.error(f"无法获取 {symbol} 的数据，所有尝试都失败了")
+        return None
+
     def fetch_historical_data(self, start_date):
         """获取历史数据"""
         try:
@@ -311,12 +405,7 @@ class MarketDataCollector:
                 
                 for start, end, interval in segments:
                     logger.info(f"获取 {symbol} 从 {start} 到 {end} 的 {interval} 数据")
-                    data = yf.download(
-                        symbol,
-                        start=start,
-                        end=end,
-                        interval=interval
-                    )
+                    data = self.get_historical_data(symbol, start, end, interval)
                     
                     for timestamp, row in data.iterrows():
                         rate = self.round_decimal(row['Close'])
@@ -355,12 +444,7 @@ class MarketDataCollector:
                     
                     for start, end, interval in segments:
                         logger.info(f"获取 {market}:{symbol} 从 {start} 到 {end} 的 {interval} 数据")
-                        data = yf.download(
-                            yf_symbol,
-                            start=start,
-                            end=end,
-                            interval=interval
-                        )
+                        data = self.get_historical_data(yf_symbol, start, end, interval)
                         
                         currency = 'USD' if market == 'US' else 'HKD' if market == 'HK' else 'CNY'
                         
@@ -414,19 +498,32 @@ class MarketDataCollector:
                 time.sleep(FETCH_INTERVAL)
         except KeyboardInterrupt:
             logger.info("程序正在退出...")
+            self.cleanup()
         except Exception as e:
             logger.error(f"运行时发生错误: {e}")
+            self.cleanup()
+
+    def cleanup(self):
+        """清理资源"""
+        try:
+            if hasattr(self, 'write_api') and self.write_api:
+                logger.info("正在关闭 InfluxDB write_api...")
+                self.write_api.close()
+            if hasattr(self, 'influx_client') and self.influx_client:
+                logger.info("正在关闭 InfluxDB client...")
+                self.influx_client.close()
+            if hasattr(self, 'cursor') and self.cursor:
+                logger.info("正在关闭 MySQL cursor...")
+                self.cursor.close()
+            if hasattr(self, 'db') and self.db:
+                logger.info("正在关闭 MySQL connection...")
+                self.db.close()
+        except Exception as e:
+            logger.error(f"清理资源时发生错误: {e}")
 
     def __del__(self):
-        """清理资源"""
-        if hasattr(self, 'cursor') and self.cursor:
-            self.cursor.close()
-        if hasattr(self, 'db') and self.db:
-            self.db.close()
-        if hasattr(self, 'write_api') and self.write_api:
-            self.write_api.close()
-        if hasattr(self, 'influx_client') and self.influx_client:
-            self.influx_client.close()
+        """析构函数"""
+        self.cleanup()
 
 if __name__ == "__main__":
     collector = MarketDataCollector()

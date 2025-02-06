@@ -51,6 +51,16 @@ class HistoricalDataImporter:
             logger.error(f"数值转换错误 {value}: {e}")
             return value
 
+    def safe_float(self, value):
+        """安全地将值转换为float"""
+        try:
+            if hasattr(value, 'iloc'):
+                return float(value.iloc[0])
+            return float(value)
+        except Exception as e:
+            logger.error(f"转换float失败: {e}")
+            return 0.0
+
     def get_historical_data(self, symbol, start, end, interval, retries=3):
         """获取历史数据，带重试机制"""
         for attempt in range(retries):
@@ -115,7 +125,7 @@ class HistoricalDataImporter:
                     for index, row in data.iterrows():
                         try:
                             timestamp = index.to_pydatetime()
-                            rate = self.round_decimal(float(row['Close']))
+                            rate = self.round_decimal(self.safe_float(row['Close']))
                             
                             # MySQL写入
                             if self.use_mysql:
@@ -184,8 +194,8 @@ class HistoricalDataImporter:
                         for index, row in data.iterrows():
                             try:
                                 timestamp = index.to_pydatetime()
-                                price = self.round_decimal(float(row['Close']))
-                                volume = int(row['Volume']) if 'Volume' in row else 0
+                                price = self.round_decimal(self.safe_float(row['Close']))
+                                volume = int(self.safe_float(row['Volume'])) if 'Volume' in row else 0
                                 
                                 # MySQL写入
                                 if self.use_mysql:
@@ -241,7 +251,7 @@ class HistoricalDataImporter:
                     for index, row in data.iterrows():
                         try:
                             timestamp = index.to_pydatetime()
-                            eur_usd_rate = float(row['Close'])
+                            eur_usd_rate = self.safe_float(row['Close'])
                             usd_index = self.round_decimal((1 / eur_usd_rate) * 88.3)
                             
                             # MySQL写入

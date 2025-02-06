@@ -7,10 +7,6 @@ do
     sleep 1
 done
 
-# 同步数据库配置
-echo "Syncing database configuration..."
-python sync_data.py
-
 # 导入历史数据
 echo "Importing historical data..."
 python historical_data_importer.py

@@ -83,15 +83,28 @@ class HistoricalDataImporter:
     def get_data_segments(self):
         """根据时间跨度返回数据获取分段"""
         end_date = datetime.now()
-        days_diff = (end_date - self.start_date).days
         
-        segments = [
-            (self.start_date, min(self.start_date + timedelta(days=60), end_date), '1d'),  # 60天以前的数据
-            (max(end_date - timedelta(days=60), self.start_date), end_date - timedelta(days=7), '1h'),  # 7-60天的数据
-            (end_date - timedelta(days=7), end_date, '1m')  # 最近7天的数据
-        ]
+        # 计算时间段
+        recent_7d = end_date - timedelta(days=7)
+        recent_60d = end_date - timedelta(days=60)
         
-        # 过滤掉无效的时间段
+        segments = []
+        
+        # 如果起始日期早于60天前，添加日级别数据段
+        if self.start_date < recent_60d:
+            segments.append((self.start_date, recent_60d, '1d'))  # 60天以前的数据用天级别
+        
+        # 如果起始日期早于或在最近60天内，添加小时级别数据段
+        if self.start_date < recent_7d:
+            start = max(self.start_date, recent_60d)
+            segments.append((start, recent_7d, '1h'))  # 7-60天的数据用小时级别
+        
+        # 如果起始日期早于或在最近7天内，添加分钟级别数据段
+        if self.start_date < end_date:
+            start = max(self.start_date, recent_7d)
+            segments.append((start, end_date, '1m'))  # 最近7天的数据用分钟级别
+        
+        # 过滤掉无效的时间段（结束时间早于开始时间的段）
         return [(start, end, interval) for start, end, interval in segments if start < end]
 
     def import_historical_exchange_rates(self):

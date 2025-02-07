@@ -60,54 +60,39 @@ class MarketDataCollector:
             try:
                 # 对于货币对特殊处理
                 if symbol.endswith('=X'):
-                    # 尝试不同的符号格式
-                    symbols_to_try = [symbol]
-                    if symbol.startswith('USD'):
-                        alt_symbol = f"{symbol[3:6]}USD=X"
-                        symbols_to_try.append(alt_symbol)
-                    
-                    # 尝试不同的时间间隔
-                    intervals = ['1m', '5m', '1h']
-                    
-                    for sym in symbols_to_try:
-                        for interval in intervals:
-                            try:
-                                data = yf.download(
-                                    sym, 
-                                    period='1d', 
-                                    interval=interval,
-                                    progress=False,
-                                    ignore_tz=True
-                                )
-                                if not data.empty:
-                                    latest = data.iloc[-1]
-                                    timestamp = data.index[-1].tz_localize('UTC')
-                                    close_price = float(latest['Close'].iloc[0]) if hasattr(latest['Close'], 'iloc') else float(latest['Close'])
-                                    # 如果是反转的符号，需要取倒数
-                                    if sym != symbol:
-                                        close_price = 1 / close_price
-                                    return {
-                                        'timestamp': timestamp,
-                                        'Close': close_price,
-                                        'Volume': int(latest['Volume'].iloc[0]) if hasattr(latest['Volume'], 'iloc') else int(latest['Volume']) if 'Volume' in latest else 0
-                                    }
-                            except Exception as e:
-                                logger.warning(f"使用间隔 {interval} 获取 {sym} 失败: {e}")
-                                continue
-                else:
-                    # 非货币对的正常处理
                     data = yf.download(
                         symbol, 
                         period='1d', 
                         interval='1m',
-                        progress=False,
-                        ignore_tz=True
+                        progress=False
                     )
                     if not data.empty:
                         latest = data.iloc[-1]
-                        timestamp = data.index[-1].tz_localize('UTC')
                         return {
-                            'timestamp': timestamp,
+                            'timestamp': data.index[-1],
+                            'Close': float(latest['Close'].iloc[0]) if hasattr(latest['Close'], 'iloc') else float(latest['Close']),
+                            'Volume': int(latest['Volume'].iloc[0]) if hasattr(latest['Volume'], 'iloc') else int(latest['Volume']) if 'Volume' in latest else 0
+                        }
+                else:
+                    # 非货币对的处理
+                    if symbol.startswith('^'):  # 美股指数
+                        period = '2d'
+                        interval = '1h'
+                    else:  # 其他市场
+                        period = '1d'
+                        interval = '1m'
+                        
+                    data = yf.download(
+                        symbol, 
+                        period=period,
+                        interval=interval,
+                        progress=False
+                    )
+                    if not data.empty:
+                        latest = data.iloc[-1]
+                        logger.info(f"获取到 {symbol} 数据: 时间={data.index[-1]}, 价格={latest['Close']}")
+                        return {
+                            'timestamp': data.index[-1],
                             'Close': float(latest['Close'].iloc[0]) if hasattr(latest['Close'], 'iloc') else float(latest['Close']),
                             'Volume': int(latest['Volume'].iloc[0]) if hasattr(latest['Volume'], 'iloc') else int(latest['Volume']) if 'Volume' in latest else 0
                         }
@@ -323,48 +308,15 @@ class MarketDataCollector:
         """获取历史数据，带重试机制"""
         for attempt in range(retries):
             try:
-                # 对于货币对，尝试反转符号
-                if symbol.endswith('=X'):
-                    symbols_to_try = [symbol]
-                    # 如果是 USDXXX=X 格式，也尝试 XXXUSD=X 格式
-                    if symbol.startswith('USD'):
-                        alt_symbol = f"{symbol[3:6]}USD=X"
-                        symbols_to_try.append(alt_symbol)
-                    
-                    for sym in symbols_to_try:
-                        try:
-                            data = yf.download(
-                                sym,
-                                start=start,
-                                end=end,
-                                interval=interval,
-                                progress=False,
-                                ignore_tz=True
-                            )
-                            if not data.empty:
-                                # 如果是反转的符号，需要取倒数
-                                if sym != symbol:
-                                    data['Close'] = 1 / data['Close']
-                                data.index = data.index.tz_localize('UTC')
-                                return data
-                        except Exception as e:
-                            logger.warning(f"尝试符号 {sym} 失败: {e}")
-                            continue
-                else:
-                    data = yf.download(
-                        symbol,
-                        start=start,
-                        end=end,
-                        interval=interval,
-                        progress=False,
-                        ignore_tz=True
-                    )
-                    if not data.empty:
-                        data.index = data.index.tz_localize('UTC')
-                        return data
-                
-                if attempt < retries - 1:
-                    time.sleep(5 * (attempt + 1))
+                data = yf.download(
+                    symbol,
+                    start=start,
+                    end=end,
+                    interval=interval,
+                    progress=False
+                )
+                if not data.empty:
+                    return data
                     
             except Exception as e:
                 logger.error(f"第{attempt + 1}次获取{symbol}数据失败: {e}")
